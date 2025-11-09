@@ -636,7 +636,7 @@ class Protector {
 			],
 			'is_protected'         => $this->is_protected(),
 			'has_protection_files' => $this->has_protection_files(),
-			'needs_update'         => (bool) $this->needs_protection_update(), // Cast to bool
+			'needs_update'         => (bool) $this->needs_protection_update(),
 			'allowed_extensions'   => $this->allowed_extensions,
 			'use_dated_folders'    => $this->use_dated_folders,
 		];
@@ -670,8 +670,8 @@ class Protector {
 		// Add protection test results if available
 		$test_result             = $this->test_protection();
 		$info['protection_test'] = [
-			'status'  => $test_result['protected'],
-			'message' => $test_result['message'],
+			'status'  => $test_result['protected'] ?? false,  // FIX: Use 'protected' key with null coalescing
+			'message' => $test_result['message'] ?? '',
 			'method'  => $test_result['method'] ?? 'http_request',
 		];
 
@@ -701,7 +701,7 @@ class Protector {
 				'preview' => substr( $content, 0, 200 ) . ( strlen( $content ) > 200 ? '...' : '' ),
 				'size'    => filesize( $htaccess_path ),
 				'lines'   => substr_count( $content, "\n" ) + 1,
-				'hash'    => md5( $content ), // For change detection
+				'hash'    => md5( $content ),
 			];
 		}
 
