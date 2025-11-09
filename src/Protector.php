@@ -121,12 +121,13 @@ class Protector {
 
 		$upload_path = $this->get_upload_path();
 
+		// Create directory if it doesn't exist (MOVED BEFORE writable check!)
+		wp_mkdir_p( $upload_path );
+
+		// Now check if writable
 		if ( ! wp_is_writable( $upload_path ) ) {
 			return false;
 		}
-
-		// Create directory if it doesn't exist
-		wp_mkdir_p( $upload_path );
 
 		// Create protection files with force parameter
 		$created = $this->create_protection_files( $upload_path, $force );
