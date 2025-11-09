@@ -16,6 +16,9 @@ declare( strict_types=1 );
 
 namespace ArrayPress\ProtectedFolders;
 
+use ArrayPress\Utils\MIME;
+use ArrayPress\Utils\File;
+
 /**
  * Delivery Class
  *
@@ -29,9 +32,8 @@ class Delivery {
 	 * @var array
 	 */
 	private array $defaults = [
-		'chunk_size'   => 1048576, // 1MB
+		'chunk_size'   => 1048576, // 1MB default, auto-optimized by file type
 		'enable_range' => true
-		// Note: force_download removed - now auto-detected
 	];
 
 	/**
@@ -40,51 +42,6 @@ class Delivery {
 	 * @var array
 	 */
 	private array $options;
-
-	/**
-	 * Common MIME type mappings.
-	 *
-	 * @var array
-	 */
-	private array $mime_types = [
-		// Documents
-		'pdf'  => 'application/pdf',
-		'doc'  => 'application/msword',
-		'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-		'xls'  => 'application/vnd.ms-excel',
-		'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-		'ppt'  => 'application/vnd.ms-powerpoint',
-		'pptx' => 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-
-		// Media
-		'mp3'  => 'audio/mpeg',
-		'ogg'  => 'audio/ogg',
-		'wav'  => 'audio/wav',
-		'mp4'  => 'video/mp4',
-		'webm' => 'video/webm',
-		'avi'  => 'video/x-msvideo',
-
-		// Images
-		'jpg'  => 'image/jpeg',
-		'jpeg' => 'image/jpeg',
-		'png'  => 'image/png',
-		'gif'  => 'image/gif',
-		'webp' => 'image/webp',
-		'svg'  => 'image/svg+xml',
-
-		// Archives
-		'zip'  => 'application/zip',
-		'rar'  => 'application/x-rar-compressed',
-		'7z'   => 'application/x-7z-compressed',
-		'tar'  => 'application/x-tar',
-		'gz'   => 'application/gzip',
-
-		// Text
-		'txt'  => 'text/plain',
-		'csv'  => 'text/csv',
-		'json' => 'application/json',
-		'xml'  => 'application/xml'
-	];
 
 	/**
 	 * Constructor.
@@ -103,7 +60,7 @@ class Delivery {
 	/**
 	 * Stream a file to the browser.
 	 *
-	 * Automatically detects optimal settings based on file type.
+	 * Automatically detects optimal settings based on file type using the MIME utility.
 	 *
 	 * @param string $file_path      Path to the file to stream.
 	 * @param array  $overrides      {
@@ -120,7 +77,7 @@ class Delivery {
 	 */
 	public function stream( string $file_path, array $overrides = [] ): void {
 		// Verify file exists and is readable
-		if ( ! file_exists( $file_path ) || ! is_readable( $file_path ) ) {
+		if ( ! File::is_readable( $file_path ) ) {
 			wp_die(
 				__( 'File not found or not readable.', 'arraypress' ),
 				__( 'Download Error', 'arraypress' ),
@@ -133,22 +90,22 @@ class Delivery {
 
 		// Set default filename if not provided
 		if ( empty( $options['filename'] ) ) {
-			$options['filename'] = basename( $file_path );
+			$options['filename'] = File::get_basename( $file_path );
 		}
 
 		// Auto-detect MIME type if not provided
 		if ( empty( $options['mime_type'] ) ) {
-			$options['mime_type'] = $this->detect_mime_type( $file_path );
+			$options['mime_type'] = MIME::get_type( $file_path );
 		}
 
 		// Auto-detect download behavior if not explicitly set
 		if ( ! isset( $overrides['force_download'] ) ) {
-			$options['force_download'] = $this->should_force_download( $options['mime_type'] );
+			$options['force_download'] = MIME::should_force_download( $options['mime_type'] );
 		}
 
 		// Optimize chunk size based on MIME type if not explicitly set
 		if ( ! isset( $overrides['chunk_size'] ) ) {
-			$options['chunk_size'] = $this->get_optimal_chunk_size( $options['mime_type'] );
+			$options['chunk_size'] = MIME::get_optimal_chunk_size( $options['mime_type'] );
 		}
 
 		// Setup environment
@@ -199,93 +156,6 @@ class Delivery {
 	 */
 	public function get_options(): array {
 		return $this->options;
-	}
-
-	/**
-	 * Detect MIME type from file.
-	 *
-	 * @param string $file_path File path.
-	 *
-	 * @return string MIME type.
-	 */
-	private function detect_mime_type( string $file_path ): string {
-		$extension = strtolower( pathinfo( $file_path, PATHINFO_EXTENSION ) );
-
-		// Check our common types first
-		if ( isset( $this->mime_types[ $extension ] ) ) {
-			return $this->mime_types[ $extension ];
-		}
-
-		// Fall back to WordPress detection
-		$filetype = wp_check_filetype( $file_path );
-
-		return $filetype['type'] ?: 'application/octet-stream';
-	}
-
-	/**
-	 * Determine if file should be downloaded or displayed inline.
-	 *
-	 * @param string $mime_type MIME type.
-	 *
-	 * @return bool True to force download, false to display inline.
-	 */
-	private function should_force_download( string $mime_type ): bool {
-		// Images should display inline
-		if ( str_starts_with( $mime_type, 'image/' ) ) {
-			return false;
-		}
-
-		// Video/audio should stream inline (HTML5 players)
-		if ( str_starts_with( $mime_type, 'video/' ) || str_starts_with( $mime_type, 'audio/' ) ) {
-			return false;
-		}
-
-		// These specific types make sense to view inline
-		$inline_types = [
-			'application/pdf',  // PDFs can be viewed in browser
-			'text/plain',       // Text files
-			'text/csv',         // CSV can be displayed
-		];
-
-		if ( in_array( $mime_type, $inline_types, true ) ) {
-			return false;
-		}
-
-		// Everything else downloads (safer default)
-		// This includes: ZIP, DOC, DOCX, XLS, executables, unknown types
-		return true;
-	}
-
-	/**
-	 * Get optimal chunk size for MIME type.
-	 *
-	 * @param string $mime_type MIME type.
-	 *
-	 * @return int Chunk size in bytes.
-	 */
-	private function get_optimal_chunk_size( string $mime_type ): int {
-		// Video files need larger chunks for smooth streaming
-		if ( str_starts_with( $mime_type, 'video/' ) ) {
-			return 2097152; // 2MB
-		}
-
-		// Archives benefit from larger chunks
-		if ( str_contains( $mime_type, 'zip' ) || str_contains( $mime_type, 'compressed' ) || str_contains( $mime_type, 'tar' ) ) {
-			return 4194304; // 4MB
-		}
-
-		// Audio files
-		if ( str_starts_with( $mime_type, 'audio/' ) ) {
-			return 1048576; // 1MB
-		}
-
-		// Images can use smaller chunks
-		if ( str_starts_with( $mime_type, 'image/' ) ) {
-			return 524288; // 512KB
-		}
-
-		// Default for documents and others
-		return 1048576; // 1MB
 	}
 
 	/**
@@ -358,8 +228,8 @@ class Delivery {
 		// Set disposition
 		$disposition = $inline ? 'inline' : 'attachment';
 
-		// Sanitize filename for header
-		$safe_filename = preg_replace( '/[^a-zA-Z0-9._-]/', '_', $filename );
+		// Sanitize filename for header using File utility
+		$safe_filename = File::sanitize_filename( $filename );
 
 		// Use RFC 5987 for international characters
 		if ( $safe_filename !== $filename ) {
@@ -424,7 +294,7 @@ class Delivery {
 		@set_time_limit( 0 );
 
 		// Increase memory limit for large files
-		$file_size = filesize( $file_path );
+		$file_size = File::get_size( $file_path ) ?? 0;
 		if ( $file_size > 100 * 1024 * 1024 ) { // 100MB
 			@ini_set( 'memory_limit', '256M' );
 		}
@@ -462,7 +332,7 @@ class Delivery {
 				'/protected/',
 				$file_path
 			);
-			header( 'X-Accel-Redirect: ' . $internal_path . basename( $file_path ) );
+			header( 'X-Accel-Redirect: ' . $internal_path . File::get_basename( $file_path ) );
 		} else {
 			// Apache and LiteSpeed use X-Sendfile with full path
 			header( 'X-Sendfile: ' . $file_path );
@@ -478,7 +348,7 @@ class Delivery {
 	 * @return void
 	 */
 	private function stream_file( string $file_path, array $options ): void {
-		$file_size = filesize( $file_path );
+		$file_size = File::get_size( $file_path ) ?? 0;
 
 		// Set download headers
 		$this->set_download_headers(
