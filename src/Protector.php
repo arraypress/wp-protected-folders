@@ -615,8 +615,10 @@ class Protector {
 	 * @return array Server and protection information.
 	 */
 	public function get_debug_info(): array {
-		$upload_path   = $this->get_upload_path();
-		$htaccess_path = trailingslashit( $upload_path ) . '.htaccess';
+		$upload_path     = $this->get_upload_path();
+		$htaccess_path   = trailingslashit( $upload_path ) . '.htaccess';
+		$index_php_path  = trailingslashit( $upload_path ) . 'index.php';
+		$index_html_path = trailingslashit( $upload_path ) . 'index.html';
 
 		$info = [
 			'server_type'          => $this->get_server_type(),
@@ -629,24 +631,121 @@ class Protector {
 			'upload_path_writable' => wp_is_writable( $upload_path ),
 			'protection_files'     => [
 				'htaccess_exists'   => file_exists( $htaccess_path ),
-				'index_php_exists'  => file_exists( trailingslashit( $upload_path ) . 'index.php' ),
-				'index_html_exists' => file_exists( trailingslashit( $upload_path ) . 'index.html' ),
+				'index_php_exists'  => file_exists( $index_php_path ),
+				'index_html_exists' => file_exists( $index_html_path ),
 			],
 			'is_protected'         => $this->is_protected(),
 			'has_protection_files' => $this->has_protection_files(),
-			'needs_update'         => $this->needs_protection_update(),
+			'needs_update'         => (bool) $this->needs_protection_update(), // Cast to bool
 			'allowed_extensions'   => $this->allowed_extensions,
 			'use_dated_folders'    => $this->use_dated_folders,
 		];
 
+		// Add permissions info if files exist
+		if ( file_exists( $upload_path ) ) {
+			$info['permissions'] = [
+				'folder' => substr( sprintf( '%o', fileperms( $upload_path ) ), - 4 ),
+			];
+
+			if ( file_exists( $htaccess_path ) ) {
+				$info['permissions']['htaccess'] = substr( sprintf( '%o', fileperms( $htaccess_path ) ), - 4 );
+			}
+
+			if ( file_exists( $index_php_path ) ) {
+				$info['permissions']['index_php'] = substr( sprintf( '%o', fileperms( $index_php_path ) ), - 4 );
+			}
+		}
+
+		// Add dated folder info if using dated folders
+		if ( $this->use_dated_folders ) {
+			$dated_path            = $this->get_upload_path( true );
+			$info['dated_folders'] = [
+				'current_path'      => $dated_path,
+				'current_exists'    => file_exists( $dated_path ),
+				'current_protected' => file_exists( trailingslashit( $dated_path ) . '.htaccess' ),
+				'year_month'        => date( 'Y/m' ),
+			];
+		}
+
+		// Add protection test results if available
+		$test_result             = $this->test_protection();
+		$info['protection_test'] = [
+			'status'  => $test_result['protected'],
+			'message' => $test_result['message'],
+			'method'  => $test_result['method'] ?? 'http_request',
+		];
+
+		// Add delivery/server capabilities
+		$info['server_capabilities'] = [
+			'xsendfile_supported' => $this->supports_xsendfile(),
+			'server_api'          => php_sapi_name(),
+			'max_upload_size'     => wp_max_upload_size(),
+			'max_upload_size_mb'  => size_format( wp_max_upload_size() ),
+		];
+
+		// Add Apache modules if detectable
+		if ( function_exists( 'apache_get_modules' ) && $this->get_server_type() === 'apache' ) {
+			$modules                                       = apache_get_modules();
+			$info['server_capabilities']['apache_modules'] = [
+				'mod_rewrite'    => in_array( 'mod_rewrite', $modules ),
+				'mod_xsendfile'  => in_array( 'mod_xsendfile', $modules ),
+				'mod_headers'    => in_array( 'mod_headers', $modules ),
+				'mod_authz_core' => in_array( 'mod_authz_core', $modules ),
+			];
+		}
+
 		// Add .htaccess content preview if it exists
 		if ( file_exists( $htaccess_path ) ) {
 			$content                  = file_get_contents( $htaccess_path );
-			$info['htaccess_preview'] = substr( $content, 0, 200 ) . ( strlen( $content ) > 200 ? '...' : '' );
-			$info['htaccess_size']    = strlen( $content );
+			$info['htaccess_content'] = [
+				'preview' => substr( $content, 0, 200 ) . ( strlen( $content ) > 200 ? '...' : '' ),
+				'size'    => filesize( $htaccess_path ),
+				'lines'   => substr_count( $content, "\n" ) + 1,
+				'hash'    => md5( $content ), // For change detection
+			];
+		}
+
+		// Add folder statistics
+		if ( file_exists( $upload_path ) && is_dir( $upload_path ) ) {
+			$files                = glob( trailingslashit( $upload_path ) . '*' );
+			$info['folder_stats'] = [
+				'total_files'     => count( $files ),
+				'protected_files' => count( array_filter( $files, 'is_file' ) ),
+				'subdirectories'  => count( array_filter( $files, 'is_dir' ) ),
+			];
 		}
 
 		return $info;
+	}
+
+	/**
+	 * Check if server supports X-Sendfile.
+	 *
+	 * Helper method for debug info.
+	 *
+	 * @return bool True if X-Sendfile is supported.
+	 */
+	private function supports_xsendfile(): bool {
+		// Check Apache mod_xsendfile
+		if ( function_exists( 'apache_get_modules' ) ) {
+			$modules = apache_get_modules();
+			if ( in_array( 'mod_xsendfile', $modules, true ) ) {
+				return true;
+			}
+		}
+
+		// Check for LiteSpeed
+		$server = $_SERVER['SERVER_SOFTWARE'] ?? '';
+		if ( str_contains( strtolower( $server ), 'litespeed' ) ) {
+			return true;
+		}
+
+		// Check for Nginx via filter
+		if ( str_contains( strtolower( $server ), 'nginx' ) ) {
+			return apply_filters( 'protected_folders_nginx_xsendfile', false );
+		}
+
+		return false;
 	}
 
 	/**
