@@ -16,6 +16,7 @@ declare( strict_types=1 );
 
 namespace ArrayPress\ProtectedFolders;
 
+use ArrayPress\ServerUtils\Server;
 use ArrayPress\FileUtils\MIME;
 use ArrayPress\FileUtils\File;
 
@@ -112,7 +113,7 @@ class Delivery {
 		$this->setup_environment( $file_path );
 
 		// Try X-Sendfile if available (always check, it's a performance win!)
-		if ( $this->supports_xsendfile() ) {
+		if ( Server::has_xsendfile() ) {
 			$this->deliver_via_xsendfile( $file_path, $options );
 			exit;
 		}
@@ -156,36 +157,6 @@ class Delivery {
 	 */
 	public function get_options(): array {
 		return $this->options;
-	}
-
-	/**
-	 * Check if server supports X-Sendfile or X-Accel-Redirect.
-	 *
-	 * @return bool True if X-Sendfile is supported.
-	 */
-	public function supports_xsendfile(): bool {
-		// Check Apache mod_xsendfile
-		if ( function_exists( 'apache_get_modules' ) ) {
-			$modules = apache_get_modules();
-			if ( in_array( 'mod_xsendfile', $modules, true ) ) {
-				return true;
-			}
-		}
-
-		// Check for Nginx (requires manual configuration)
-		$server = $_SERVER['SERVER_SOFTWARE'] ?? '';
-		if ( str_contains( strtolower( $server ), 'nginx' ) ) {
-			// Nginx support requires configuration, check filter
-			return apply_filters( 'protected_folders_nginx_xsendfile', false );
-		}
-
-		// Check for LiteSpeed
-		if ( str_contains( strtolower( $server ), 'litespeed' ) ) {
-			// LiteSpeed supports X-Sendfile like Apache
-			return true;
-		}
-
-		return false;
 	}
 
 	/**
@@ -323,9 +294,7 @@ class Delivery {
 		);
 
 		// Check server type
-		$server = strtolower( $_SERVER['SERVER_SOFTWARE'] ?? '' );
-
-		if ( str_contains( $server, 'nginx' ) ) {
+		if ( Server::is_nginx() ) {
 			// Nginx uses X-Accel-Redirect with internal location
 			$internal_path = apply_filters(
 				'protected_folders_nginx_internal_path',

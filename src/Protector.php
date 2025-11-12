@@ -16,6 +16,9 @@ declare( strict_types=1 );
 
 namespace ArrayPress\ProtectedFolders;
 
+use ArrayPress\ServerUtils\Server;
+use ArrayPress\ServerUtils\Environment;
+
 /**
  * Protector Class
  *
@@ -43,13 +46,6 @@ class Protector {
 	 * @var bool
 	 */
 	private bool $use_dated_folders = true;
-
-	/**
-	 * Cached server type.
-	 *
-	 * @var string|null
-	 */
-	private ?string $server_type = null;
 
 	/**
 	 * Configuration array
@@ -121,7 +117,7 @@ class Protector {
 
 		$upload_path = $this->get_upload_path();
 
-		// Create directory if it doesn't exist (MOVED BEFORE writable check!)
+		// Create directory if it doesn't exist
 		wp_mkdir_p( $upload_path );
 
 		// Now check if writable
@@ -167,7 +163,7 @@ class Protector {
 		}
 
 		// For Apache servers, check if it has the module checks
-		if ( $this->get_server_type() === 'apache' && ! str_contains( $content, 'IfModule' ) ) {
+		if ( Server::is_apache() && ! str_contains( $content, 'IfModule' ) ) {
 			return true;
 		}
 
@@ -189,7 +185,7 @@ class Protector {
 		];
 
 		// Only add .htaccess for Apache/LiteSpeed servers
-		if ( in_array( $this->get_server_type(), [ 'apache', 'litespeed' ], true ) ) {
+		if ( Server::is_apache() || Server::is_litespeed() ) {
 			$files['.htaccess'] = $this->get_htaccess_rules();
 		}
 
@@ -384,7 +380,7 @@ class Protector {
 	 */
 	public function is_protected( bool $force = false ): bool {
 		// Skip test in local development if configured
-		if ( $this->is_local_development() && apply_filters( $this->prefix . '_skip_local_protection_test', true ) ) {
+		if ( Environment::is_localhost() && apply_filters( $this->prefix . '_skip_local_protection_test', true ) ) {
 			return $this->has_protection_files();
 		}
 
@@ -400,7 +396,7 @@ class Protector {
 		$upload_path = $this->get_upload_path();
 
 		// For non-Apache servers, just check if protection files exist
-		if ( ! in_array( $this->get_server_type(), [ 'apache', 'litespeed' ], true ) ) {
+		if ( ! Server::is_apache() && ! Server::is_litespeed() ) {
 			$protected = $this->has_protection_files();
 			set_transient( $transient_key, $protected ? 1 : 0, 12 * HOUR_IN_SECONDS );
 
@@ -474,7 +470,7 @@ class Protector {
 		             || file_exists( trailingslashit( $upload_path ) . 'index.html' );
 
 		// For Apache, also check .htaccess
-		if ( in_array( $this->get_server_type(), [ 'apache', 'litespeed' ], true ) ) {
+		if ( Server::is_apache() || Server::is_litespeed() ) {
 			$htaccess = trailingslashit( $upload_path ) . '.htaccess';
 			if ( file_exists( $htaccess ) ) {
 				$content = file_get_contents( $htaccess );
@@ -490,123 +486,51 @@ class Protector {
 	}
 
 	/**
-	 * Get detected server type.
-	 *
-	 * @return string Server type: 'apache', 'nginx', 'iis', 'litespeed', or 'unknown'.
-	 */
-	public function get_server_type(): string {
-		if ( $this->server_type !== null ) {
-			return $this->server_type;
-		}
-
-		$server_software       = $_SERVER['SERVER_SOFTWARE'] ?? '';
-		$server_software_lower = strtolower( $server_software );
-
-		if ( str_contains( $server_software_lower, 'nginx' ) ) {
-			$this->server_type = 'nginx';
-		} elseif ( str_contains( $server_software_lower, 'microsoft-iis' ) || str_contains( $server_software_lower, 'iis' ) ) {
-			$this->server_type = 'iis';
-		} elseif ( str_contains( $server_software_lower, 'litespeed' ) ) {
-			$this->server_type = 'litespeed';
-		} elseif ( str_contains( $server_software_lower, 'apache' ) ) {
-			$this->server_type = 'apache';
-		} else {
-			// Default to Apache as it's most common
-			$this->server_type = 'apache';
-		}
-
-		return $this->server_type;
-	}
-
-	/**
-	 * Check if running in local development environment.
-	 *
-	 * @return bool
-	 */
-	public function is_local_development(): bool {
-		$host = $_SERVER['HTTP_HOST'] ?? '';
-
-		// Common local development indicators
-		$local_indicators = [
-			'.local',
-			'.test',
-			'localhost',
-			'127.0.0.1',
-			'::1',
-			'.dev',
-			'.staging',
-		];
-
-		foreach ( $local_indicators as $indicator ) {
-			if ( str_contains( $host, $indicator ) ) {
-				return true;
-			}
-		}
-
-		// Check for Local by Flywheel
-		if ( defined( 'WP_LOCAL_DEV' ) && WP_LOCAL_DEV ) {
-			return true;
-		}
-
-		// Check for common development constants
-		if ( ( defined( 'WP_DEBUG' ) && WP_DEBUG )
-		     && ( defined( 'WP_DEBUG_DISPLAY' ) && WP_DEBUG_DISPLAY ) ) {
-			// Only consider it local if both debug and display are on
-			return apply_filters( $this->prefix . '_is_local_development', true );
-		}
-
-		return false;
-	}
-
-	/**
 	 * Get server configuration instructions based on server type.
 	 *
 	 * @return array Configuration instructions with 'type' and 'instructions' keys.
 	 */
 	public function get_server_instructions(): array {
-		$server_type = $this->get_server_type();
 		$upload_path = $this->get_upload_path();
 
-		switch ( $server_type ) {
-			case 'nginx':
-				return [
-					'type'         => 'nginx',
-					'title'        => __( 'Nginx Configuration Required', 'arraypress' ),
-					'instructions' => __( 'Add the following rules to your Nginx configuration:', 'arraypress' ),
-					'code'         => $this->get_nginx_rules(),
-					'notes'        => __( 'After adding these rules, reload Nginx: nginx -s reload', 'arraypress' )
-				];
-
-			case 'iis':
-				return [
-					'type'         => 'iis',
-					'title'        => __( 'IIS Configuration Required', 'arraypress' ),
-					'instructions' => sprintf(
-						__( 'Add the following to your web.config in %s:', 'arraypress' ),
-						$upload_path
-					),
-					'code'         => $this->get_iis_rules(),
-					'notes'        => __( 'Restart IIS after adding the configuration.', 'arraypress' )
-				];
-
-			case 'apache':
-			case 'litespeed':
-			default:
-				return [
-					'type'         => 'apache',
-					'title'        => __( 'Apache Configuration Issue', 'arraypress' ),
-					'instructions' => __( 'The .htaccess file exists but may not be working. Check:', 'arraypress' ),
-					'checklist'    => [
-						__( 'Apache mod_rewrite is enabled', 'arraypress' ),
-						__( 'AllowOverride is set to All in Apache configuration', 'arraypress' ),
-						__( 'File permissions allow reading .htaccess files', 'arraypress' ),
-						sprintf(
-							__( '.htaccess file exists at: %s', 'arraypress' ),
-							trailingslashit( $upload_path ) . '.htaccess'
-						)
-					]
-				];
+		if ( Server::is_nginx() ) {
+			return [
+				'type'         => 'nginx',
+				'title'        => __( 'Nginx Configuration Required', 'arraypress' ),
+				'instructions' => __( 'Add the following rules to your Nginx configuration:', 'arraypress' ),
+				'code'         => $this->get_nginx_rules(),
+				'notes'        => __( 'After adding these rules, reload Nginx: nginx -s reload', 'arraypress' )
+			];
 		}
+
+		if ( Server::is_iis() ) {
+			return [
+				'type'         => 'iis',
+				'title'        => __( 'IIS Configuration Required', 'arraypress' ),
+				'instructions' => sprintf(
+					__( 'Add the following to your web.config in %s:', 'arraypress' ),
+					$upload_path
+				),
+				'code'         => $this->get_iis_rules(),
+				'notes'        => __( 'Restart IIS after adding the configuration.', 'arraypress' )
+			];
+		}
+
+		// Default to Apache/LiteSpeed
+		return [
+			'type'         => 'apache',
+			'title'        => __( 'Apache Configuration Issue', 'arraypress' ),
+			'instructions' => __( 'The .htaccess file exists but may not be working. Check:', 'arraypress' ),
+			'checklist'    => [
+				__( 'Apache mod_rewrite is enabled', 'arraypress' ),
+				__( 'AllowOverride is set to All in Apache configuration', 'arraypress' ),
+				__( 'File permissions allow reading .htaccess files', 'arraypress' ),
+				sprintf(
+					__( '.htaccess file exists at: %s', 'arraypress' ),
+					trailingslashit( $upload_path ) . '.htaccess'
+				)
+			]
+		];
 	}
 
 	/**
@@ -621,9 +545,10 @@ class Protector {
 		$index_html_path = trailingslashit( $upload_path ) . 'index.html';
 
 		$info = [
-			'server_type'          => $this->get_server_type(),
-			'server_software'      => $_SERVER['SERVER_SOFTWARE'] ?? 'Unknown',
-			'is_local_development' => $this->is_local_development(),
+			'server_type'          => $this->get_server_type_string(),
+			'server_software'      => Server::get_software(),
+			'is_local_development' => Environment::is_localhost(),
+			'environment_type'     => Environment::get_type(),
 			'host'                 => $_SERVER['HTTP_HOST'] ?? 'Unknown',
 			'upload_path'          => $upload_path,
 			'upload_url'           => $this->get_upload_url(),
@@ -636,7 +561,7 @@ class Protector {
 			],
 			'is_protected'         => $this->is_protected(),
 			'has_protection_files' => $this->has_protection_files(),
-			'needs_update'         => (bool) $this->needs_protection_update(),
+			'needs_update'         => $this->needs_protection_update(),
 			'allowed_extensions'   => $this->allowed_extensions,
 			'use_dated_folders'    => $this->use_dated_folders,
 		];
@@ -670,27 +595,30 @@ class Protector {
 		// Add protection test results if available
 		$test_result             = $this->test_protection();
 		$info['protection_test'] = [
-			'status'  => $test_result['protected'] ?? false,  // FIX: Use 'protected' key with null coalescing
+			'status'  => $test_result['protected'] ?? false,
 			'message' => $test_result['message'] ?? '',
 			'method'  => $test_result['method'] ?? 'http_request',
 		];
 
 		// Add delivery/server capabilities
 		$info['server_capabilities'] = [
-			'xsendfile_supported' => $this->supports_xsendfile(),
+			'xsendfile_supported' => Server::has_xsendfile(),
+			'mod_rewrite'         => Server::has_mod_rewrite(),
+			'supports_htaccess'   => Server::supports_htaccess(),
+			'supports_gzip'       => Server::supports_gzip(),
 			'server_api'          => php_sapi_name(),
 			'max_upload_size'     => wp_max_upload_size(),
 			'max_upload_size_mb'  => size_format( wp_max_upload_size() ),
 		];
 
 		// Add Apache modules if detectable
-		if ( function_exists( 'apache_get_modules' ) && $this->get_server_type() === 'apache' ) {
-			$modules                                       = apache_get_modules();
+		$apache_modules = Server::get_apache_modules();
+		if ( $apache_modules !== null ) {
 			$info['server_capabilities']['apache_modules'] = [
-				'mod_rewrite'    => in_array( 'mod_rewrite', $modules ),
-				'mod_xsendfile'  => in_array( 'mod_xsendfile', $modules ),
-				'mod_headers'    => in_array( 'mod_headers', $modules ),
-				'mod_authz_core' => in_array( 'mod_authz_core', $modules ),
+				'mod_rewrite'    => in_array( 'mod_rewrite', $apache_modules ),
+				'mod_xsendfile'  => in_array( 'mod_xsendfile', $apache_modules ),
+				'mod_headers'    => in_array( 'mod_headers', $apache_modules ),
+				'mod_authz_core' => in_array( 'mod_authz_core', $apache_modules ),
 			];
 		}
 
@@ -719,33 +647,25 @@ class Protector {
 	}
 
 	/**
-	 * Check if server supports X-Sendfile.
+	 * Get server type as string for debug info.
 	 *
-	 * Helper method for debug info.
-	 *
-	 * @return bool True if X-Sendfile is supported.
+	 * @return string Server type string.
 	 */
-	private function supports_xsendfile(): bool {
-		// Check Apache mod_xsendfile
-		if ( function_exists( 'apache_get_modules' ) ) {
-			$modules = apache_get_modules();
-			if ( in_array( 'mod_xsendfile', $modules, true ) ) {
-				return true;
-			}
+	private function get_server_type_string(): string {
+		if ( Server::is_nginx() ) {
+			return 'nginx';
+		}
+		if ( Server::is_iis() ) {
+			return 'iis';
+		}
+		if ( Server::is_litespeed() ) {
+			return 'litespeed';
+		}
+		if ( Server::is_apache() ) {
+			return 'apache';
 		}
 
-		// Check for LiteSpeed
-		$server = $_SERVER['SERVER_SOFTWARE'] ?? '';
-		if ( str_contains( strtolower( $server ), 'litespeed' ) ) {
-			return true;
-		}
-
-		// Check for Nginx via filter
-		if ( str_contains( strtolower( $server ), 'nginx' ) ) {
-			return apply_filters( 'protected_folders_nginx_xsendfile', false );
-		}
-
-		return false;
+		return 'unknown';
 	}
 
 	/**
@@ -759,18 +679,20 @@ class Protector {
 
 		if ( ! $created ) {
 			return [
-				'success' => false,
-				'message' => __( 'Failed to create protection files. Check directory permissions.', 'arraypress' )
+				'success'   => false,
+				'message'   => __( 'Failed to create protection files. Check directory permissions.', 'arraypress' ),
+				'protected' => false
 			];
 		}
 
 		// Check if we're in local development
-		if ( $this->is_local_development() ) {
+		if ( Environment::is_localhost() ) {
 			if ( $this->has_protection_files() ) {
 				return [
-					'success'  => true,
-					'message'  => __( 'Protection files created. Note: Direct access test may fail in local development but will work on production servers.', 'arraypress' ),
-					'is_local' => true
+					'success'   => true,
+					'message'   => __( 'Protection files created. Note: Direct access test may fail in local development but will work on production servers.', 'arraypress' ),
+					'is_local'  => true,
+					'protected' => true
 				];
 			}
 		}
@@ -780,33 +702,35 @@ class Protector {
 
 		if ( $is_protected ) {
 			return [
-				'success' => true,
-				'message' => __( 'Files are successfully protected from direct access.', 'arraypress' )
+				'success'   => true,
+				'message'   => __( 'Files are successfully protected from direct access.', 'arraypress' ),
+				'protected' => true
 			];
 		}
 
-		$server_type = $this->get_server_type();
-
-		if ( $server_type === 'nginx' ) {
+		if ( Server::is_nginx() ) {
 			return [
 				'success'     => false,
 				'message'     => __( 'Nginx detected. Manual configuration required.', 'arraypress' ),
-				'server_type' => 'nginx'
+				'server_type' => 'nginx',
+				'protected'   => false
 			];
 		}
 
-		if ( $server_type === 'iis' ) {
+		if ( Server::is_iis() ) {
 			return [
 				'success'     => false,
 				'message'     => __( 'IIS detected. Manual configuration required.', 'arraypress' ),
-				'server_type' => 'iis'
+				'server_type' => 'iis',
+				'protected'   => false
 			];
 		}
 
 		return [
 			'success'     => false,
 			'message'     => __( 'Protection files created but direct access is still possible. Check server configuration.', 'arraypress' ),
-			'server_type' => $server_type
+			'server_type' => $this->get_server_type_string(),
+			'protected'   => false
 		];
 	}
 
