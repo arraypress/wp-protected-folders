@@ -1,6 +1,7 @@
 # WordPress Protected Folders
 
-Complete folder protection and file delivery system for WordPress. Protects upload directories with .htaccess rules, verifies protection is working, and provides secure file streaming with range support and server optimizations.
+Complete folder protection and file delivery system for WordPress. Protects upload directories with .htaccess rules,
+verifies protection is working, and provides secure file streaming with range support and server optimizations.
 
 ## Features
 
@@ -75,13 +76,13 @@ create_file_delivery( array $options = [] ): Delivery
 
 ## Configuration Options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `allowed_types` | array | `['jpg', 'jpeg', 'png', 'gif', 'webp']` | File extensions allowed for public access |
-| `dated_folders` | bool | `true` | Organize uploads by year/month |
-| `auto_protect` | bool | `false` | Automatically protect on admin_init |
-| `upload_filter` | mixed | `null` | Post types, admin pages, or callback for upload filtering |
-| `admin_notice_pages` | array | `[]` | Admin page slugs to show protection notices |
+| Option               | Type  | Default                                 | Description                                               |
+|----------------------|-------|-----------------------------------------|-----------------------------------------------------------|
+| `allowed_types`      | array | `['jpg', 'jpeg', 'png', 'gif', 'webp']` | File extensions allowed for public access                 |
+| `dated_folders`      | bool  | `true`                                  | Organize uploads by year/month                            |
+| `auto_protect`       | bool  | `false`                                 | Automatically protect on admin_init                       |
+| `upload_filter`      | mixed | `null`                                  | Post types, admin pages, or callback for upload filtering |
+| `admin_notice_pages` | array | `[]`                                    | Admin page slugs to show protection notices               |
 
 ## File Delivery Features
 
@@ -89,14 +90,14 @@ The delivery system automatically optimizes based on file type:
 
 ### Automatic Behavior by File Type
 
-| File Type | Behavior | Chunk Size |
-|-----------|----------|------------|
-| **PDF** | Display inline | 1MB |
-| **Images** | Display inline | 512KB |
-| **Video** | Stream with range support | 2MB |
-| **Audio** | Stream with range support | 1MB |
-| **Archives** | Force download | 4MB |
-| **Documents** | Force download | 1MB |
+| File Type     | Behavior                  | Chunk Size |
+|---------------|---------------------------|------------|
+| **PDF**       | Display inline            | 1MB        |
+| **Images**    | Display inline            | 512KB      |
+| **Video**     | Stream with range support | 2MB        |
+| **Audio**     | Stream with range support | 1MB        |
+| **Archives**  | Force download            | 4MB        |
+| **Documents** | Force download            | 1MB        |
 
 ### Delivery Options
 
@@ -119,6 +120,7 @@ Automatically detects and uses X-Sendfile for better performance:
 - **LiteSpeed**: X-Sendfile
 
 For Nginx, configure internal location:
+
 ```nginx
 location /internal/ {
     internal;
@@ -127,6 +129,7 @@ location /internal/ {
 ```
 
 Then enable in WordPress:
+
 ```php
 add_filter( 'protected_folders_nginx_xsendfile', '__return_true' );
 add_filter( 'protected_folders_nginx_internal_path', function() {
@@ -313,17 +316,22 @@ register_protected_folder( 'conditional', [
 ## Server Configuration
 
 ### Apache/LiteSpeed
+
 Works automatically with .htaccess files.
 
 ### Nginx
+
 Get rules for manual configuration:
+
 ```php
 $protector = get_protected_folder( 'downloads' );
 echo $protector->get_nginx_rules();
 ```
 
 ### IIS
+
 Get web.config rules:
+
 ```php
 $protector = get_protected_folder( 'downloads' );
 echo $protector->get_iis_rules();
