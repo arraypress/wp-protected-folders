@@ -18,7 +18,6 @@ namespace ArrayPress\ProtectedFolders;
 
 use ArrayPress\ServerUtils\Server;
 use ArrayPress\FileUtils\MIME;
-use ArrayPress\FileUtils\File;
 
 /**
  * Delivery Class
@@ -78,7 +77,7 @@ class Delivery {
 	 */
 	public function stream( string $file_path, array $overrides = [] ): void {
 		// Verify file exists and is readable
-		if ( ! File::is_readable( $file_path ) ) {
+		if ( ! is_readable( $file_path ) ) {
 			wp_die(
 				__( 'File not found or not readable.', 'arraypress' ),
 				__( 'Download Error', 'arraypress' ),
@@ -91,7 +90,7 @@ class Delivery {
 
 		// Set default filename if not provided
 		if ( empty( $options['filename'] ) ) {
-			$options['filename'] = File::get_basename( $file_path );
+			$options['filename'] = basename( $file_path );
 		}
 
 		// Auto-detect MIME type if not provided
@@ -199,8 +198,8 @@ class Delivery {
 		// Set disposition
 		$disposition = $inline ? 'inline' : 'attachment';
 
-		// Sanitize filename for header using File utility
-		$safe_filename = File::sanitize_filename( $filename );
+		// Sanitize filename for header
+		$safe_filename = sanitize_file_name( $filename );
 
 		// Use RFC 5987 for international characters
 		if ( $safe_filename !== $filename ) {
@@ -265,7 +264,7 @@ class Delivery {
 		@set_time_limit( 0 );
 
 		// Increase memory limit for large files
-		$file_size = File::get_size( $file_path ) ?? 0;
+		$file_size = filesize( $file_path ) ?: 0;
 		if ( $file_size > 100 * 1024 * 1024 ) { // 100MB
 			@ini_set( 'memory_limit', '256M' );
 		}
@@ -301,7 +300,7 @@ class Delivery {
 				'/protected/',
 				$file_path
 			);
-			header( 'X-Accel-Redirect: ' . $internal_path . File::get_basename( $file_path ) );
+			header( 'X-Accel-Redirect: ' . $internal_path . basename( $file_path ) );
 		} else {
 			// Apache and LiteSpeed use X-Sendfile with full path
 			header( 'X-Sendfile: ' . $file_path );
@@ -317,7 +316,7 @@ class Delivery {
 	 * @return void
 	 */
 	private function stream_file( string $file_path, array $options ): void {
-		$file_size = File::get_size( $file_path ) ?? 0;
+		$file_size = filesize( $file_path ) ?: 0;
 
 		// Set download headers
 		$this->set_download_headers(

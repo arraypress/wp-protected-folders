@@ -16,6 +16,7 @@ declare( strict_types=1 );
 
 namespace ArrayPress\ProtectedFolders;
 
+use ArrayPress\FileUtils\File;
 use ArrayPress\ServerUtils\Server;
 use ArrayPress\ServerUtils\Environment;
 
@@ -337,14 +338,11 @@ class Protector {
 	 * @return string
 	 */
 	public function get_upload_path( bool $dated = false ): string {
-		$wp_upload_dir = wp_upload_dir();
-		$path          = trailingslashit( $wp_upload_dir['basedir'] ) . $this->prefix;
+		$path = File::upload_path( $this->prefix );
 
 		if ( $dated && $this->use_dated_folders ) {
 			$time = current_time( 'mysql' );
-			$y    = substr( $time, 0, 4 );
-			$m    = substr( $time, 5, 2 );
-			$path .= "/$y/$m";
+			$path .= '/' . substr( $time, 0, 4 ) . '/' . substr( $time, 5, 2 );
 		}
 
 		return $path;
@@ -358,14 +356,11 @@ class Protector {
 	 * @return string
 	 */
 	public function get_upload_url( bool $dated = false ): string {
-		$wp_upload_dir = wp_upload_dir();
-		$url           = trailingslashit( $wp_upload_dir['baseurl'] ) . $this->prefix;
+		$url = File::upload_url( $this->prefix );
 
 		if ( $dated && $this->use_dated_folders ) {
 			$time = current_time( 'mysql' );
-			$y    = substr( $time, 0, 4 );
-			$m    = substr( $time, 5, 2 );
-			$url  .= "/$y/$m";
+			$url .= '/' . substr( $time, 0, 4 ) . '/' . substr( $time, 5, 2 );
 		}
 
 		return $url;
