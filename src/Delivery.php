@@ -105,7 +105,7 @@ class Delivery {
 
 		// Optimize chunk size based on MIME type if not explicitly set
 		if ( ! isset( $overrides['chunk_size'] ) ) {
-			$options['chunk_size'] = MIME::get_optimal_chunk_size( $options['mime_type'] );
+			$options['chunk_size'] = self::get_optimal_chunk_size( $options['mime_type'] );
 		}
 
 		// Setup environment
@@ -156,6 +156,64 @@ class Delivery {
 	 */
 	public function get_options(): array {
 		return $this->options;
+	}
+
+	/**
+	 * Get optimal chunk size for streaming based on MIME type.
+	 *
+	 * @param string $mime_type MIME type.
+	 *
+	 * @return int Chunk size in bytes.
+	 */
+	private static function get_optimal_chunk_size( string $mime_type ): int {
+		// Video files need larger chunks for smooth streaming
+		if ( str_starts_with( $mime_type, 'video/' ) ) {
+			return 2097152; // 2MB
+		}
+
+		// Archives and large files benefit from larger chunks
+		$large_chunk_types = [
+			'application/zip',
+			'application/x-rar-compressed',
+			'application/x-7z-compressed',
+			'application/x-tar',
+			'application/gzip',
+			'application/x-apple-diskimage',
+		];
+
+		if ( in_array( $mime_type, $large_chunk_types, true ) ) {
+			return 4194304; // 4MB
+		}
+
+		// Audio files
+		if ( str_starts_with( $mime_type, 'audio/' ) ) {
+			return 1048576; // 1MB
+		}
+
+		// Images can use smaller chunks
+		if ( str_starts_with( $mime_type, 'image/' ) ) {
+			if ( $mime_type === 'image/vnd.adobe.photoshop' ) {
+				return 2097152; // 2MB
+			}
+
+			return 524288; // 512KB for regular images
+		}
+
+		// PDFs and documents
+		$document_types = [
+			'application/pdf',
+			'application/msword',
+			'application/vnd.openxmlformats-officedocument',
+		];
+
+		foreach ( $document_types as $type ) {
+			if ( str_starts_with( $mime_type, $type ) ) {
+				return 1048576; // 1MB
+			}
+		}
+
+		// Default for everything else
+		return 1048576; // 1MB
 	}
 
 	/**
