@@ -1,474 +1,357 @@
 <?php
 /**
- * File Delivery Handler
- *
- * Handles secure file delivery with support for streaming, range requests,
- * and X-Sendfile/X-Accel-Redirect for optimal performance.
+ * Delivery
  *
  * @package     ArrayPress\ProtectedFolders
- * @copyright   Copyright (c) 2025, ArrayPress Limited
+ * @copyright   Copyright (c) 2026, ArrayPress Limited
  * @license     GPL2+
- * @version     1.0.0
- * @author      David Sherlock
+ * @since       2.0.0
  */
 
 declare( strict_types=1 );
 
 namespace ArrayPress\ProtectedFolders;
 
-use ArrayPress\ServerUtils\Server;
 use ArrayPress\FileUtils\MIME;
+use ArrayPress\ProtectedFolders\Utils\Runtime;
+use ArrayPress\ServerUtils\Server;
 
 /**
- * Delivery Class
+ * Sending a file to somebody who is allowed to have it.
  *
- * Secure file delivery with streaming and server optimization support.
+ * The path in here is the local one: read the bytes off disk and write them
+ * to the connection, with range requests so a large download can be resumed
+ * and a video can be seeked.
+ *
+ * It is not the only path a store needs. A file that lives in object storage
+ * should be redirected to rather than proxied — the signed URL is the whole
+ * point of object storage, and streaming it through PHP pays for the bytes
+ * twice. So before anything is read, a filter is given the chance to answer
+ * with somewhere to send the browser instead:
+ *
+ *     add_filter( 'protected_folders_redirect_to', function ( $url, $file ) {
+ *         return $signer->url_for( $file );
+ *     }, 10, 2 );
+ *
+ * One call site, either delivery. That is the seam, and it is here rather
+ * than in the caller because the caller is a download endpoint that has
+ * already done the hard part — working out whether this person may have the
+ * file — and should not also have to know where it is kept.
  */
-class Delivery {
+final class Delivery {
 
 	/**
-	 * Default delivery options.
+	 * How much to read at a time.
 	 *
-	 * @var array
+	 * A megabyte. The old version varied it by file type, which sounds like
+	 * tuning and is not: the figure that matters is the socket's, and PHP
+	 * writing 512KB instead of 1MB into the same buffer changes nothing
+	 * anybody can measure.
 	 */
-	private array $defaults = [
-		'chunk_size'   => 1048576, // 1MB default, auto-optimized by file type
-		'enable_range' => true
-	];
+	private const CHUNK = 1048576;
 
 	/**
-	 * Current delivery options.
+	 * Send a file.
 	 *
-	 * @var array
+	 * Exits, because a download's response has no page after it.
+	 *
+	 * @param string               $path    The file, already confirmed to be
+	 *                                      one this person may have.
+	 * @param array<string, mixed> $options filename, mime_type, force_download, ranges.
+	 *
+	 * @return never
 	 */
-	private array $options;
+	public static function send( string $path, array $options = [] ): void {
+		/**
+		 * Send the browser somewhere else instead of reading the file.
+		 *
+		 * Return a URL — a signed object-storage URL, usually — and the
+		 * browser is redirected to it. Return null and the file is read from
+		 * disk as normal.
+		 *
+		 * @param string|null          $url     Where to send them, or null.
+		 * @param string               $path    The file.
+		 * @param array<string, mixed> $options The delivery options.
+		 *
+		 * @since 2.0.0
+		 */
+		$elsewhere = apply_filters( Runtime::hook( 'redirect_to' ), null, $path, $options );
 
-	/**
-	 * Constructor.
-	 *
-	 * @param array $options      {
-	 *                            Optional delivery configuration.
-	 *
-	 * @type int    $chunk_size   Chunk size in bytes (default: 1MB, auto-optimized by file type)
-	 * @type bool   $enable_range Enable range request support (default: true)
-	 *                            }
-	 */
-	public function __construct( array $options = [] ) {
-		$this->options = array_merge( $this->defaults, $options );
-	}
+		if ( is_string( $elsewhere ) && '' !== $elsewhere ) {
+			// Not wp_safe_redirect(): the whole point is that the file is on
+			// somebody else's host, and the allowed-hosts list exists to stop
+			// a *user-supplied* URL being followed. This one came from a
+			// filter the site's own code registered — if that is untrusted,
+			// so is everything else in the request.
+			//
+			// A 302 rather than a 301: a signed URL expires, and a permanent
+			// redirect to one would be cached long after it stopped working.
+			wp_redirect( $elsewhere, 302 ); // phpcs:ignore WordPress.Security.SafeRedirect.wp_redirect_wp_redirect -- see above.
 
-	/**
-	 * Stream a file to the browser.
-	 *
-	 * Automatically detects optimal settings based on file type using the MIME utility.
-	 *
-	 * @param string $file_path      Path to the file to stream.
-	 * @param array  $overrides      {
-	 *                               Optional delivery overrides for this specific file.
-	 *
-	 * @type string  $filename       Filename for download (default: basename of file)
-	 * @type string  $mime_type      MIME type (default: auto-detect)
-	 * @type bool    $force_download Force download instead of auto-detect behavior
-	 * @type int     $chunk_size     Chunk size in bytes
-	 * @type bool    $enable_range   Enable range request support
-	 *                               }
-	 *
-	 * @return void Exits after delivery.
-	 */
-	public function stream( string $file_path, array $overrides = [] ): void {
-		// Verify file exists and is readable
-		if ( ! is_readable( $file_path ) ) {
+			exit;
+		}
+
+		if ( ! is_readable( $path ) || ! is_file( $path ) ) {
 			wp_die(
-				__( 'File not found or not readable.', 'arraypress' ),
-				__( 'Download Error', 'arraypress' ),
+				esc_html__( 'That file is not available.', 'arraypress' ),
+				esc_html__( 'Download', 'arraypress' ),
 				[ 'response' => 404 ]
 			);
 		}
 
-		// Merge options with overrides
-		$options = array_merge( $this->options, $overrides );
+		$type = (string) ( $options['mime_type'] ?? MIME::of( $path ) );
+		$name = (string) ( $options['filename'] ?? basename( $path ) );
 
-		// Set default filename if not provided
-		if ( empty( $options['filename'] ) ) {
-			$options['filename'] = basename( $file_path );
+		$download = array_key_exists( 'force_download', $options )
+			? (bool) $options['force_download']
+			: MIME::must_download( $type );
+
+		// Whatever anybody asked for, a type a browser would execute is
+		// never rendered: shown inline it runs in the origin of the site
+		// serving it, against that site's cookies.
+		if ( MIME::is_dangerous_inline( $type ) ) {
+			$download = true;
+			$type     = 'application/octet-stream';
 		}
 
-		// Auto-detect MIME type if not provided
-		if ( empty( $options['mime_type'] ) ) {
-			$options['mime_type'] = MIME::get_type( $file_path );
-		}
+		self::prepare();
+		self::headers( $name, $type, $download );
 
-		// Auto-detect download behavior if not explicitly set
-		if ( ! isset( $overrides['force_download'] ) ) {
-			$options['force_download'] = MIME::should_force_download( $options['mime_type'] );
-		}
+		$size  = (int) filesize( $path );
+		$range = ( $options['ranges'] ?? true ) ? self::range( $size ) : null;
 
-		// Optimize chunk size based on MIME type if not explicitly set
-		if ( ! isset( $overrides['chunk_size'] ) ) {
-			$options['chunk_size'] = self::get_optimal_chunk_size( $options['mime_type'] );
-		}
-
-		// Setup environment
-		$this->setup_environment( $file_path );
-
-		// Try X-Sendfile if available (always check, it's a performance win!)
-		if ( Server::has_xsendfile() ) {
-			$this->deliver_via_xsendfile( $file_path, $options );
+		if ( false === $range ) {
+			// Asked for, and not satisfiable. Said properly rather than
+			// answering with the whole file, which is what happened before —
+			// a 416 header was sent and then two hundred megabytes followed
+			// it.
+			status_header( 416 );
+			header( 'Content-Range: bytes */' . $size );
 			exit;
 		}
 
-		// Stream file normally
-		$this->stream_file( $file_path, $options );
+		if ( self::via_server( $path, $range ) ) {
+			exit;
+		}
+
+		[ $start, $end ] = $range ?? [ 0, $size - 1 ];
+
+		if ( null !== $range ) {
+			status_header( 206 );
+			header( sprintf( 'Content-Range: bytes %d-%d/%d', $start, $end, $size ) );
+		}
+
+		header( 'Accept-Ranges: bytes' );
+		header( 'Content-Length: ' . ( $end - $start + 1 ) );
+
+		self::read( $path, $start, $end );
+
 		exit;
 	}
 
 	/**
-	 * Set a delivery option.
+	 * Give the file to the web server to send.
 	 *
-	 * @param string $key   Option key.
-	 * @param mixed  $value Option value.
+	 * Apache with mod_xsendfile, LiteSpeed, or nginx once somebody has added
+	 * the internal location. The server sends the file itself, which frees
+	 * the PHP worker for the length of a download — the difference between a
+	 * site that can serve twenty concurrent downloads and one that can serve
+	 * as many as it has workers.
 	 *
-	 * @return self Returns self for method chaining.
+	 * Refused when a range was asked for: the server handles ranges itself
+	 * from here, and sending it a range header as well produces a response
+	 * with two of them.
+	 *
+	 * @param string          $path  The file.
+	 * @param array{0:int,1:int}|null $range The range, if one was asked for.
+	 *
+	 * @return bool Whether the server took it.
 	 */
-	public function set_option( string $key, $value ): self {
-		$this->options[ $key ] = $value;
-
-		return $this;
-	}
-
-	/**
-	 * Set multiple delivery options.
-	 *
-	 * @param array $options Options to set.
-	 *
-	 * @return self Returns self for method chaining.
-	 */
-	public function set_options( array $options ): self {
-		$this->options = array_merge( $this->options, $options );
-
-		return $this;
-	}
-
-	/**
-	 * Get current delivery options.
-	 *
-	 * @return array Current options.
-	 */
-	public function get_options(): array {
-		return $this->options;
-	}
-
-	/**
-	 * Get optimal chunk size for streaming based on MIME type.
-	 *
-	 * @param string $mime_type MIME type.
-	 *
-	 * @return int Chunk size in bytes.
-	 */
-	private static function get_optimal_chunk_size( string $mime_type ): int {
-		// Video files need larger chunks for smooth streaming
-		if ( str_starts_with( $mime_type, 'video/' ) ) {
-			return 2097152; // 2MB
+	private static function via_server( string $path, ?array $range ): bool {
+		if ( ! class_exists( Server::class ) || ! Server::has_xsendfile() ) {
+			return false;
 		}
 
-		// Archives and large files benefit from larger chunks
-		$large_chunk_types = [
-			'application/zip',
-			'application/x-rar-compressed',
-			'application/x-7z-compressed',
-			'application/x-tar',
-			'application/gzip',
-			'application/x-apple-diskimage',
-		];
+		if ( Server::is_nginx() ) {
+			$uploads = wp_upload_dir();
+			$base    = wp_normalize_path( (string) $uploads['basedir'] );
+			$file    = wp_normalize_path( $path );
 
-		if ( in_array( $mime_type, $large_chunk_types, true ) ) {
-			return 4194304; // 4MB
-		}
-
-		// Audio files
-		if ( str_starts_with( $mime_type, 'audio/' ) ) {
-			return 1048576; // 1MB
-		}
-
-		// Images can use smaller chunks
-		if ( str_starts_with( $mime_type, 'image/' ) ) {
-			if ( $mime_type === 'image/vnd.adobe.photoshop' ) {
-				return 2097152; // 2MB
+			// The whole path below the uploads directory, not basename() —
+			// which is what this used to send, so every file in a dated
+			// folder resolved to nothing and 404'd.
+			if ( ! str_starts_with( $file, $base . '/' ) ) {
+				return false;
 			}
 
-			return 524288; // 512KB for regular images
+			header( 'X-Accel-Redirect: ' . Rules::internal_location() . ltrim( substr( $file, strlen( $base ) ), '/' ) );
+
+			return true;
 		}
 
-		// PDFs and documents
-		$document_types = [
-			'application/pdf',
-			'application/msword',
-			'application/vnd.openxmlformats-officedocument',
-		];
+		header( 'X-Sendfile: ' . $path );
 
-		foreach ( $document_types as $type ) {
-			if ( str_starts_with( $mime_type, $type ) ) {
-				return 1048576; // 1MB
-			}
-		}
-
-		// Default for everything else
-		return 1048576; // 1MB
+		return true;
 	}
 
 	/**
-	 * Set secure download headers.
+	 * The headers every delivery sends.
 	 *
-	 * @param string      $filename  Filename for download.
-	 * @param string|null $mime_type MIME type.
-	 * @param bool        $inline    Whether to display inline instead of download.
+	 * @param string $filename What to call it.
+	 * @param string $type     What it is.
+	 * @param bool   $download Whether to save it rather than show it.
 	 *
 	 * @return void
 	 */
-	private function set_download_headers( string $filename, ?string $mime_type = null, bool $inline = false ): void {
-		// Prevent caching
+	private static function headers( string $filename, string $type, bool $download ): void {
 		nocache_headers();
 
-		// Security headers
 		header( 'X-Robots-Tag: noindex, nofollow', true );
+
+		// Without this a browser may sniff the bytes and decide the file is
+		// HTML whatever the Content-Type says, which turns an uploaded file
+		// into a script running on the store's own domain.
 		header( 'X-Content-Type-Options: nosniff' );
 
-		// Force download for potentially dangerous types
-		$dangerous_types = [
-			'text/html',
-			'text/javascript',
-			'application/javascript',
-			'application/x-javascript',
-			'application/x-httpd-php'
-		];
-
-		if ( in_array( strtolower( $mime_type ), $dangerous_types, true ) ) {
-			$mime_type = 'application/octet-stream';
-			$inline    = false;
-		}
-
-		header( 'Content-Type: ' . $mime_type );
-
-		// File transfer headers
-		header( 'Content-Description: File Transfer' );
+		header( 'Content-Type: ' . $type );
 		header( 'Content-Transfer-Encoding: binary' );
 
-		// Set disposition
-		$disposition = $inline ? 'inline' : 'attachment';
+		$disposition = $download ? 'attachment' : 'inline';
+		$ascii       = sanitize_file_name( $filename );
 
-		// Sanitize filename for header
-		$safe_filename = sanitize_file_name( $filename );
-
-		// Use RFC 5987 for international characters
-		if ( $safe_filename !== $filename ) {
-			header( sprintf(
+		// Two filenames, because the quoted one cannot carry anything
+		// outside ASCII and a customer who bought "Manuel d'utilisation.pdf"
+		// should get that name rather than a mangled one. RFC 6266: a client
+		// that understands filename* uses it, and one that does not falls
+		// back to the plain one.
+		header(
+			sprintf(
 				'Content-Disposition: %s; filename="%s"; filename*=UTF-8\'\'%s',
 				$disposition,
-				$safe_filename,
+				str_replace( '"', '', $ascii ),
 				rawurlencode( $filename )
-			) );
-		} else {
-			header( sprintf( 'Content-Disposition: %s; filename="%s"', $disposition, $safe_filename ) );
-		}
+			)
+		);
 	}
 
 	/**
-	 * Parse HTTP range header.
+	 * What the request asked for, if it asked for part of the file.
 	 *
-	 * @param int $file_size Total file size in bytes.
+	 * @param int $size The file's size.
 	 *
-	 * @return array|null Array with 'start' and 'end' positions or null if no valid range.
+	 * @return array{0:int,1:int}|null|false The range, null for the whole
+	 *                                       file, false for one that cannot
+	 *                                       be satisfied.
 	 */
-	private function parse_range_header( int $file_size ): ?array {
-		if ( ! isset( $_SERVER['HTTP_RANGE'] ) ) {
+	private static function range( int $size ): array|null|false {
+		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized, WordPress.Security.ValidatedSanitizedInput.MissingUnslash -- matched against a pattern on the next line, which is stricter than any sanitizer.
+		$header = isset( $_SERVER['HTTP_RANGE'] ) ? (string) $_SERVER['HTTP_RANGE'] : '';
+
+		if ( '' === $header || 0 === $size ) {
 			return null;
 		}
 
-		$range = $_SERVER['HTTP_RANGE'];
-
-		// Parse bytes range
-		if ( ! preg_match( '/^bytes=(\d*)-(\d*)$/', $range, $matches ) ) {
+		// One range. Several — `bytes=0-99,200-299` — need a multipart
+		// response, which nothing asks for in practice and which this does
+		// not pretend to do: the whole file is a valid answer to a range
+		// request, and half a multipart response is not.
+		if ( 1 !== preg_match( '/^bytes=(\d*)-(\d*)$/', trim( $header ), $found ) ) {
 			return null;
 		}
 
-		$start = $matches[1] !== '' ? (int) $matches[1] : 0;
-		$end   = $matches[2] !== '' ? (int) $matches[2] : $file_size - 1;
-
-		// Validate range
-		if ( $start > $end || $start >= $file_size || $end >= $file_size ) {
-			header( 'HTTP/1.1 416 Range Not Satisfiable' );
-			header( 'Content-Range: bytes */' . $file_size );
-
+		if ( '' === $found[1] && '' === $found[2] ) {
 			return null;
 		}
 
-		return [ 'start' => $start, 'end' => $end ];
+		// `bytes=-500` is the last five hundred, not the first.
+		if ( '' === $found[1] ) {
+			$start = max( 0, $size - (int) $found[2] );
+			$end   = $size - 1;
+		} else {
+			$start = (int) $found[1];
+			$end   = '' === $found[2] ? $size - 1 : (int) $found[2];
+		}
+
+		$end = min( $end, $size - 1 );
+
+		return $start > $end || $start >= $size ? false : [ $start, $end ];
 	}
 
 	/**
-	 * Setup delivery environment.
-	 *
-	 * @param string $file_path Path to file being delivered.
+	 * Get out of the way of a large response.
 	 *
 	 * @return void
 	 */
-	private function setup_environment( string $file_path ): void {
-		// Clean output buffers
+	private static function prepare(): void {
+		// Anything already buffered would be written before the file and
+		// become part of it. A stray newline from a plugin's closing tag has
+		// corrupted more downloads than any other single cause.
 		while ( ob_get_level() > 0 ) {
-			@ob_end_clean();
+			ob_end_clean();
 		}
 
-		// Prevent timeouts for large files
-		@set_time_limit( 0 );
-
-		// Increase memory limit for large files
-		$file_size = filesize( $file_path ) ?: 0;
-		if ( $file_size > 100 * 1024 * 1024 ) { // 100MB
-			@ini_set( 'memory_limit', '256M' );
+		if ( function_exists( 'set_time_limit' ) && false === strpos( (string) ini_get( 'disable_functions' ), 'set_time_limit' ) ) {
+			set_time_limit( 0 );
 		}
 
-		// Disable compression
+		// Compressing a file that is already compressed wastes time and,
+		// worse, breaks Content-Length — which breaks resuming.
 		if ( function_exists( 'apache_setenv' ) ) {
-			@apache_setenv( 'no-gzip', '1' );
+			apache_setenv( 'no-gzip', '1' );
 		}
-		@ini_set( 'zlib.output_compression', 'Off' );
-	}
 
-	/**
-	 * Deliver file via X-Sendfile or X-Accel-Redirect.
-	 *
-	 * @param string $file_path File path.
-	 * @param array  $options   Delivery options.
-	 *
-	 * @return void
-	 */
-	private function deliver_via_xsendfile( string $file_path, array $options ): void {
-		// Set headers
-		$this->set_download_headers(
-			$options['filename'],
-			$options['mime_type'] ?? null,
-			! $options['force_download']
-		);
-
-		// Check server type
-		if ( Server::is_nginx() ) {
-			// Nginx uses X-Accel-Redirect with internal location
-			$internal_path = apply_filters(
-				'protected_folders_nginx_internal_path',
-				'/protected/',
-				$file_path
-			);
-			header( 'X-Accel-Redirect: ' . $internal_path . basename( $file_path ) );
-		} else {
-			// Apache and LiteSpeed use X-Sendfile with full path
-			header( 'X-Sendfile: ' . $file_path );
+		if ( '' !== (string) ini_get( 'zlib.output_compression' ) ) {
+			ini_set( 'zlib.output_compression', 'Off' ); // phpcs:ignore WordPress.PHP.IniSet.Risky -- a compressed download has the wrong Content-Length and cannot be resumed.
 		}
 	}
 
 	/**
-	 * Stream file with optional range support.
+	 * Write part of a file to the connection.
 	 *
-	 * @param string $file_path File path.
-	 * @param array  $options   Delivery options.
-	 *
-	 * @return void
-	 */
-	private function stream_file( string $file_path, array $options ): void {
-		$file_size = filesize( $file_path ) ?: 0;
-
-		// Set download headers
-		$this->set_download_headers(
-			$options['filename'],
-			$options['mime_type'] ?? null,
-			! $options['force_download']
-		);
-
-		// Handle range requests
-		$range = null;
-		if ( $options['enable_range'] ) {
-			$range = $this->parse_range_header( $file_size );
-		}
-
-		if ( $range !== null ) {
-			// Partial content
-			header( 'HTTP/1.1 206 Partial Content' );
-			header( 'Accept-Ranges: bytes' );
-			header( sprintf(
-				'Content-Range: bytes %d-%d/%d',
-				$range['start'],
-				$range['end'],
-				$file_size
-			) );
-			header( 'Content-Length: ' . ( $range['end'] - $range['start'] + 1 ) );
-
-			$this->read_file_chunked( $file_path, $range['start'], $range['end'], $options['chunk_size'] );
-		} else {
-			// Full content
-			header( 'Accept-Ranges: ' . ( $options['enable_range'] ? 'bytes' : 'none' ) );
-			header( 'Content-Length: ' . $file_size );
-
-			$this->read_file_chunked( $file_path, 0, $file_size - 1, $options['chunk_size'] );
-		}
-	}
-
-	/**
-	 * Read and output file in chunks.
-	 *
-	 * @param string $file_path  File path.
-	 * @param int    $start      Start byte position.
-	 * @param int    $end        End byte position.
-	 * @param int    $chunk_size Chunk size in bytes.
+	 * @param string $path  The file.
+	 * @param int    $start First byte.
+	 * @param int    $end   Last byte.
 	 *
 	 * @return void
 	 */
-	private function read_file_chunked( string $file_path, int $start, int $end, int $chunk_size ): void {
-		$handle = @fopen( $file_path, 'rb' );
+	private static function read( string $path, int $start, int $end ): void {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- a file written to the connection a megabyte at a time; WP_Filesystem's only read is the whole file into memory, which for a download is the bug this avoids.
+		$handle = fopen( $path, 'rb' );
 
-		if ( ! $handle ) {
+		if ( false === $handle ) {
 			wp_die(
-				__( 'Cannot open file for reading.', 'arraypress' ),
-				__( 'Download Error', 'arraypress' ),
+				esc_html__( 'That file could not be read.', 'arraypress' ),
+				esc_html__( 'Download', 'arraypress' ),
 				[ 'response' => 500 ]
 			);
 		}
 
-		// Seek to start position
 		if ( $start > 0 ) {
 			fseek( $handle, $start );
 		}
 
-		$bytes_sent    = 0;
-		$bytes_to_send = $end - $start + 1;
+		$remaining = $end - $start + 1;
 
-		while ( ! feof( $handle ) && $bytes_sent < $bytes_to_send && connection_status() === CONNECTION_NORMAL ) {
-			// Calculate chunk size for this iteration
-			$chunk = min( $chunk_size, $bytes_to_send - $bytes_sent );
-
-			// Read and output chunk
-			$buffer = fread( $handle, $chunk );
-			if ( $buffer === false ) {
+		while ( $remaining > 0 && ! feof( $handle ) ) {
+			// The browser went away. Without this the worker reads the rest
+			// of a two gigabyte file into a socket nobody is listening to.
+			if ( CONNECTION_NORMAL !== connection_status() ) {
 				break;
 			}
 
-			echo $buffer;
-			$bytes_sent += strlen( $buffer );
+			$buffer = fread( $handle, (int) min( self::CHUNK, $remaining ) );
 
-			// Flush periodically for large files
-			if ( $bytes_sent % ( 10 * 1024 * 1024 ) === 0 ) { // Every 10MB
-				if ( ob_get_level() > 0 ) {
-					@ob_flush();
-				}
-				@flush();
+			if ( false === $buffer || '' === $buffer ) {
+				break;
 			}
+
+			echo $buffer; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- the bytes of the file being downloaded.
+
+			$remaining -= strlen( $buffer );
+
+			flush();
 		}
 
 		fclose( $handle );
-
-		// Final flush
-		if ( ob_get_level() > 0 ) {
-			@ob_flush();
-		}
-		@flush();
 	}
-
 }
