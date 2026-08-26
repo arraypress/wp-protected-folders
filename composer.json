@@ -25,7 +25,7 @@
             "ArrayPress\\ProtectedFolders\\": "src/"
         },
         "files": [
-            "src/Utils/Functions.php"
+            "src/Functions.php"
         ]
     },
     "autoload-dev": {
